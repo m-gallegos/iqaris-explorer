@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iqaris-explorer"
+version = "0.1.0"
+description = "Explore, visualize and export the IQARIS real-space quantum-chemistry database."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Miguel Gallegos" },
+  { name = "Jose Manuel Guevara-Vela" },
+  { name = "Alexandre Tkatchenko" },
+]
+keywords = ["QTAIM", "IQA", "quantum chemical topology", "machine learning", "chemistry", "database"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+  "duckdb>=1.0",
+  "numpy>=1.24",
+  "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+# the 3D viewer colours by matplotlib/seaborn colormaps and renders equations with matplotlib,
+# so the viewer extra pulls them in addition to pyvista.
+viewer = ["pyvista>=0.44", "matplotlib>=3.7", "seaborn>=0.13"]   # self-contained VTK window
+qt     = ["pyvistaqt>=0.11", "PySide6>=6.6", "qtpy>=2.4"]   # optional native-Qt panel
+export = ["h5py>=3.8", "ase>=3.22"]             # graph/HDF5 + ASE-db writers
+plots  = ["matplotlib>=3.7", "seaborn>=0.13"]   # distribution/coverage plots
+all    = ["pyvista>=0.44", "pyvistaqt>=0.11", "PySide6>=6.6", "qtpy>=2.4",
+          "h5py>=3.8", "ase>=3.22", "matplotlib>=3.7", "seaborn>=0.13"]
+
+[project.scripts]
+iqaris = "iqaris_export.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/m-gallegos/iqaris-explorer"
+Dataset  = "https://doi.org/10.5281/zenodo.22177221"
+
+[tool.setuptools.packages.find]
+include = ["iqaris_export*"]

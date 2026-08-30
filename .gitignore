@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# The IQARIS database is distributed via Zenodo, NOT committed here
+iqaris_db*/
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# Exports / rendered outputs
+*.xyz
+*.h5
+*.hdf5
+*.npz
+exports/
+*.png
+*.pdf
+# keep documentation images (README screenshots)
+!docs/
+!docs/**/*.png
+
+# Backups / editor leftovers (never commit snapshots)
+*.bak
+*.bak_*
+*.bak.*
+*~
+*.orig
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
