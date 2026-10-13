@@ -13,6 +13,8 @@ Quick start (Python)::
     print(ie.describe(con, sel))
     ie.export(con, sel, props="atomic,charges", level="PM7",
               fmt="extxyz", out="exports/demo")
+    L = ie.ldm(con, "dsgdb9nsd_000013", level="pbe0")        # localization-delocalization matrix
+    E = ie.iqa_matrix(con, "dsgdb9nsd_000013", level="PM7")  # IQA energy matrix
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from .registry import get_registry, ColumnSpec
 from .engine import Exporter
 from .explore import describe, coverage, column_stats, value_range, list_props, property_info
 from .writers import get_writer, TABULAR_FORMATS, ALL_FORMATS, export_tabular
+from .matrices import AtomMatrix, ldm, iqa_matrix, atom_matrices, condense, plot_matrix
 from . import property_docs
 
 __version__ = "0.1.0"
@@ -35,6 +38,7 @@ __all__ = [
     "config", "ALL_FORMATS", "project", "build_scene", "emit_jmol", "Scene",
     "plot_property_map", "view", "emit_pyvista", "Style",
     "info", "property_info", "glossary", "property_docs",
+    "AtomMatrix", "ldm", "iqa_matrix", "atom_matrices", "condense", "plot_matrix",
 ]
 
 

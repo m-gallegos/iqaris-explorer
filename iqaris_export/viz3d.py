@@ -336,9 +336,112 @@ def side_for_level(level):
     return "sqm"
 # radio-button group names (each group is mutually exclusive; one is a distinct picker)
 _G_LEVEL, _G_CMAP, _G_BONDS = "iq_level", "iq_cmap", "iq_bonds"
+_G_ROW = "iq_row"
+ROW_OPTIONS = ("off", "ldm", "iqa")              # the "atom row" selector (same choices as the Qt combo)
+ROW_LABEL = {"off": "off", "ldm": "DI(A,B)", "iqa": "E_int(A,B)"}
 # property dropdown: rows per column x columns per page (the open menu overlays the scene)
 _PROP_ROWS, _PROP_COLS = 16, 2
 _PROP_PAGE = _PROP_ROWS * _PROP_COLS
+
+
+# Matrix representations a viewer level admits (viewer level tokens: "DFT" = M06-2X, "PBE0", or an
+# SQM method): the LDM is a QTAIM quantity (M06-2X, PBE0); the IQA energy matrix exists ab initio at
+# PBE0 and at the five semiempirical levels.
+MATRIX_LEVELS = {"ldm": ("DFT", "PBE0"),
+                 "iqa": ("PBE0", "PM7", "PM6", "PM6-D3H4", "PM6-D3H4X", "PM6-ORG")}
+MATRIX_KIND_LABEL = {"ldm": "DI(A,B) (LDM)", "iqa": "E_int(A,B) (IQA)"}
+
+
+def matrix_level(level):
+    """Viewer level token -> `matrices` level token (DFT -> m062x, PBE0 -> pbe0, SQM unchanged)."""
+    return "m062x" if level == "DFT" else "pbe0" if level == "PBE0" else level
+
+
+def property_card_png(info, path, width_in=5.2, dpi=110):
+    """Render a property's dictionary entry (name, key, symbol, unit, type, level of theory, prose,
+    typeset equation, see-also) as a PNG card -- the on-canvas counterpart of the Qt viewer's info popup."""
+    import textwrap
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    rows = [(info.get("name") or info.get("column", ""), 13, "bold", "#14202b", "sans-serif")]
+    sub = info.get("column", "") + (f"     {info['symbol']}" if info.get("symbol") else "")
+    rows.append((sub, 9.5, "normal", "#6a7683", "monospace"))
+    meta = "   \u00b7   ".join(x for x in (f"Unit: {info['unit']}" if info.get("unit") else "",
+                                           f"Type: {info['type']}" if info.get("type") else "") if x)
+    if meta:
+        rows.append((meta, 9.5, "bold", "#55606b", "sans-serif"))
+    if info.get("method"):
+        for ln in textwrap.wrap(f"Level of theory: {info['method']}", 66):
+            rows.append((ln, 9, "normal", "#6a7683", "sans-serif"))
+    if info.get("description"):
+        rows.append(("", 4, "normal", "#22303c", "sans-serif"))
+        for ln in textwrap.wrap(info["description"], 66):
+            rows.append((ln, 9.5, "normal", "#22303c", "sans-serif"))
+    eq_latex, eq_text = info.get("eq_latex"), info.get("eq_text")
+    tail = []
+    if info.get("see_also"):
+        for ln in textwrap.wrap("See also:  " + ",  ".join(info["see_also"]), 66):
+            tail.append((ln, 9, "normal", "#6a7683", "sans-serif"))
+    lh = lambda fs: fs * 1.55 / 72.0
+    eq_h = 0.55 if (eq_latex or eq_text) else 0.0
+    height = 0.30 + sum(lh(r[1]) for r in rows + tail) + eq_h
+    fig = Figure(figsize=(width_in, height), dpi=dpi)
+    FigureCanvasAgg(fig)
+    fig.patch.set_facecolor("white")
+    y = height - 0.18
+
+    def put(txt, fs, wt, col, fam):
+        nonlocal y
+        y -= lh(fs)
+        fig.text(0.04, y / height, txt, fontsize=fs, fontweight=wt, color=col, family=fam,
+                 va="bottom")
+    for r in rows:
+        put(*r)
+    if eq_latex or eq_text:
+        y -= eq_h
+        eq = None
+        if eq_latex:
+            safe = (eq_latex.replace(r"\boldsymbol", r"\mathbf").replace(r"\tfrac", r"\frac")
+                    .replace(r"\!", ""))
+            eq = fig.text(0.5, (y + eq_h * 0.32) / height, f"${safe}$", fontsize=13, ha="center",
+                          color="#14202b")
+            try:
+                fig.canvas.draw()
+            except Exception:
+                eq.remove()
+                eq = None
+        if eq is None and eq_text:
+            fig.text(0.5, (y + eq_h * 0.32) / height, eq_text, fontsize=10, ha="center",
+                     family="monospace", color="#14202b")
+    for r in tail:
+        put(*r)
+    fig.savefig(path, dpi=dpi, facecolor="white")
+    return path
+
+
+def pick_atom(plotter, xy, scene, max_dist=1.6):
+    """1-based atom_index under the display position `xy` (pixels), or None.  A cell picker restricted
+    to the atom spheres returns the frontmost hit point; the nearest drawn atom center within
+    `max_dist` Angstrom is the picked atom (so a click on empty space or a bond end picks nothing)."""
+    try:
+        from vtkmodules.vtkRenderingCore import vtkCellPicker
+    except Exception:                                   # pragma: no cover - older VTK layout
+        from vtk import vtkCellPicker
+    ids = scene.meta.get("atom_index") if scene is not None else None
+    actor = getattr(plotter, "actors", {}).get("atoms") if plotter is not None else None
+    if not ids or actor is None:
+        return None
+    picker = vtkCellPicker()
+    picker.SetTolerance(0.0005)
+    picker.PickFromListOn()
+    picker.AddPickList(actor)
+    if not picker.Pick(float(xy[0]), float(xy[1]), 0, plotter.renderer):
+        return None
+    p = np.array(picker.GetPickPosition(), float)
+    centers = np.array([a[0] for a in scene.atoms], float)
+    dist = np.linalg.norm(centers - p, axis=1)
+    k = int(np.argmin(dist))
+    return int(ids[k]) if dist[k] <= max_dist else None
 
 
 def _level_label(opt):
@@ -370,7 +473,9 @@ class Viewer:
     no Qt."""
 
     HELP = ("keys: g/p/i graph paths ias  k fragment  o points  h H  l labels  v values   "
-            "m cmap  n bonds  +/- atoms  ,/. sticks   [ ] prev/next   r reset  q quit   "
+            "m cmap  n bonds  +/- atoms  ,/. sticks   [ ] prev/next   e atom row (off/DI/E_int)   "
+            "r reset  q quit   (atom row: pick DI or E_int, then double-click an atom; matrix: "
+            "heatmap panel; info: definition of the current property)   "
             "(property: click the dropdown; structure: click the blue button by the title; "
             "level/colormap/bonds: radio buttons; color min/max sliders set the range)")
 
@@ -439,6 +544,20 @@ class Viewer:
         self._syncing = False     # mute range-slider callbacks during programmatic value sync
         self._last_range = None   # (min, max) of the scalar shown last render, or None
         self._relayouting = False  # guard against re-entrant resize handling
+        # matrix representations: "row" colors every atom by one row of the LDM / IQA matrix for an
+        # atom A picked by double-click; "matrix" shows the heatmap as a movable on-canvas panel.
+        # The kind follows the level (M06-2X -> LDM, SQM -> IQA, PBE0 -> `_row_pbe0_kind`, key e).
+        self.row_kind = None        # "atom row" mode: None | "ldm" | "iqa" (as the Qt combo)
+        self.row_atom = None
+        self._row_sid = None
+        self._scene = None
+        self._info_on = False       # on-canvas property-definition card (as the Qt info popup)
+        self._info_widget = None    # ONE vtkLogoWidget, created once and only re-imaged / toggled
+        self._wcp = None            # CP-size slider (shown only with the molecular graph)
+        self._wpath = None          # bond-path-size slider (shown with graph or paths)
+        self._matrix_on = False
+        self._matrix_widget = None  # ONE vtkLogoWidget, created once and only re-imaged / toggled
+        self._tmpdir = None
 
     @property
     def sid(self):
@@ -624,10 +743,27 @@ class Viewer:
             if fopts and self._frag_prop not in fopts:
                 self._frag_prop = fopts[0]
         was_frag = self._frag_active
-        scene = build_scene(self.con, self.sid, prop=self.prop, method=self.method,
-                            graph=self.graph, paths=self.paths, ias=self.ias,
-                            fragment=self.fragment, fragment_prop=self._frag_prop,
-                            style=self.style, side=self._side)
+        if self._row_sid != self.sid:              # a picked atom belongs to ONE structure
+            self.row_atom = None
+            self._row_sid = self.sid
+        row = {}
+        if self.row_atom is not None and self._row_ok():
+            row = dict(row_atom=self.row_atom, row_kind=self.row_kind,
+                       row_level=matrix_level(self.level))
+        try:
+            scene = build_scene(self.con, self.sid, prop=self.prop, method=self.method,
+                                graph=self.graph, paths=self.paths, ias=self.ias,
+                                fragment=self.fragment, fragment_prop=self._frag_prop,
+                                style=self.style, side=self._side, **row)
+        except ValueError:
+            if not row:
+                raise
+            self.row_atom = None                   # e.g. no clean PBE0 record for this structure
+            scene = build_scene(self.con, self.sid, prop=self.prop, method=self.method,
+                                graph=self.graph, paths=self.paths, ias=self.ias,
+                                fragment=self.fragment, fragment_prop=self._frag_prop,
+                                style=self.style, side=self._side)
+        self._scene = scene
         self._frag_active = bool(self.fragment and scene.meta.get("nfrag", 1) >= 2)
         self._last_range = scene.meta.get("data_range")     # drives the color-range sliders
         self._names = add_scene(pl, scene, self.style, points_only=self.points_only,
@@ -643,6 +779,18 @@ class Viewer:
             title.GetTextProperty().SetFontFamilyToArial()
         except Exception:
             pass
+        if self.row_kind and scene.meta.get("row_atom") is None:
+            msg = ("double-click an atom" if self._row_ok() else
+                   "the LDM needs M06-2X or PBE0" if self.row_kind == "ldm" else
+                   "the IQA matrix needs PBE0 or an SQM level")
+            hint = pl.add_text(f"atom row {ROW_LABEL[self.row_kind]}: {msg}",
+                               position=(42, h - 54), font_size=10,
+                               color="#2c7fb8" if self._row_ok() else "#8a2b2b", name="_row_hint")
+            try:
+                hint.GetTextProperty().SetFontFamilyToArial()
+            except Exception:
+                pass
+            self._names.append("_row_hint")
         if cam is not None:
             pl.camera_position = cam
         else:
@@ -650,7 +798,12 @@ class Viewer:
             pl.camera.azimuth = 20
             pl.camera.elevation = 15
         self._first = False
+        if self._matrix_on:
+            self._refresh_matrix()           # the heatmap panel follows structure / level / kind
+        if self._info_on:
+            self._refresh_info()             # the definition card follows the property shown
         self._sync_range()               # show/hide + reseed the color-range sliders
+        self._sync_graph_sliders()       # CP / path size only while the graph / paths are drawn
         self._refresh_prop_button()      # keep the dropdown label in step with the prop / channel
         if self._frag_active != was_frag and self._menu_mode == "prop":
             self._show_menu()            # entering/leaving fragment mode flips the menu list (props
@@ -660,6 +813,161 @@ class Viewer:
         self._sync_overlay_labels()      # re-hide value/element pills if a popup is open (they were
                                          # just re-added above, always visible by default)
         pl.render()
+
+    # -- matrix representations: atom row (double-click) + heatmap panel ----------------
+    def _row_ok(self):
+        return self.row_kind in MATRIX_LEVELS and self.level in MATRIX_LEVELS[self.row_kind]
+
+    def _set_row_kind(self, opt):
+        """"atom row" selector: off | ldm (DI(A,B)) | iqa (E_int(A,B)) -- same as the Qt combo."""
+        self.row_kind = None if opt in (None, "off") else opt
+        if self.row_kind is None:
+            self.row_atom = None
+        self._resync_radio(_G_ROW, self.row_kind or "off")   # keep the selector honest (key / API)
+        self._render_scene()
+
+    def _cycle_row_kind(self):
+        """'e' key: off -> DI -> E_int -> off (the radio highlight follows)."""
+        cur = self.row_kind or "off"
+        self._set_row_kind(ROW_OPTIONS[(ROW_OPTIONS.index(cur) + 1) % len(ROW_OPTIONS)])
+
+    def _matrix_kind(self):
+        """Heatmap kind: the atom-row kind when it applies at this level, else LDM (IQA at SQM)."""
+        if self.row_kind and self._row_ok():
+            return self.row_kind
+        return "iqa" if self.level in MATRIX_LEVELS["iqa"] and self.level != "PBE0" else "ldm"
+
+    def _on_pick3d(self, xy):
+        """Double-click handler: the atom under the cursor becomes the row's reference atom A."""
+        if not self.row_kind or not self._row_ok() or self._scene is None:
+            return
+        atom = pick_atom(self._pl, xy, self._scene)
+        if atom is None:
+            return
+        self.row_atom = atom
+        self._row_sid = self.sid
+        self._render_scene()
+
+    def _toggle_matrix(self, on):
+        self._matrix_on = bool(on)
+        self._refresh_matrix()
+        try:
+            self._pl.render()
+        except Exception:
+            pass
+
+    def _refresh_matrix(self):
+        """Draw the current structure's LDM / IQA heatmap (same figure as `iqaris matrix --plot`) into
+        the on-canvas panel; the panel is a VTK logo widget the user can drag and resize."""
+        pl = self._pl
+        if pl is None:
+            return
+        if not self._matrix_on:
+            if self._matrix_widget is not None:
+                self._matrix_widget.Off()
+            return
+        import os
+        import tempfile
+        import pyvista as pv
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from .matrices import atom_matrices, plot_matrix
+        kind, lvl = self._matrix_kind(), matrix_level(self.level)
+        fig = Figure(figsize=(6.2, 5.4), dpi=110)
+        FigureCanvasAgg(fig)
+        try:
+            mats, missing = atom_matrices(self.con, [self.sid], kind=kind, level=lvl)
+            if missing:
+                raise ValueError(f"no {_level_label(self.level)} record for {self.sid}")
+            hl = self.row_atom if (self.row_kind == kind and self._row_ok()) else None
+            plot_matrix(mats[self.sid], ax=fig.add_subplot(111), highlight=hl)
+        except ValueError as e:
+            fig.text(0.5, 0.5, str(e), ha="center", va="center", fontsize=11)
+        if self._tmpdir is None:
+            self._tmpdir = tempfile.mkdtemp(prefix="iqaris_matrix_")
+        path = os.path.join(self._tmpdir, "heatmap.png")
+        fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="white")
+        img = pv.read(path)
+        if self._matrix_widget is None:
+            self._matrix_widget = pl.add_logo_widget(img, position=(0.50, 0.25), size=(0.42, 0.60))
+        else:
+            self._matrix_widget.GetRepresentation().SetImage(img)
+            self._matrix_widget.On()
+
+    def _info_prop(self):
+        """The column the definition card describes: the shown property, the aggregated host-guest
+        channel in fragment mode, or the atom-row quantity (DI / E_int) when a row is shown."""
+        if self.row_atom is not None and self._row_ok():
+            return ("DI_QTAIM" if self.row_kind == "ldm"
+                    else "EINT_IQA" if self.level == "PBE0" else "Einter_SQM")
+        if self._frag_active:
+            return self._frag_prop
+        return self.prop if self.prop not in (None, _GEOM) else None
+
+    def _toggle_info(self, on):
+        self._info_on = bool(on)
+        self._refresh_info()
+        try:
+            self._pl.render()
+        except Exception:
+            pass
+
+    def _refresh_info(self):
+        """Draw the current property's dictionary entry (definition, unit, type, level, equation) into
+        an on-canvas card -- the same content as the Qt viewer's info popup."""
+        pl = self._pl
+        if pl is None:
+            return
+        if not self._info_on:
+            if self._info_widget is not None:
+                self._info_widget.Off()
+            return
+        import os
+        import tempfile
+        import pyvista as pv
+        from .explore import property_info
+        from .project import FRAGMENTS_PROP
+        col = self._info_prop()
+        if col is None or col == FRAGMENTS_PROP:
+            info = {"name": "No property selected" if col is None else "fragments",
+                    "description": ("Pick a property (or an atom row) to see its definition, unit, "
+                                    "level of theory and equation here." if col is None else
+                                    "Structural pseudo-property: atoms are colored by covalent "
+                                    "component (connected fragment), largest first.")}
+        else:
+            try:
+                info = property_info(self.con, col)
+            except Exception:
+                info = {"column": col}
+        if self._tmpdir is None:
+            self._tmpdir = tempfile.mkdtemp(prefix="iqaris_matrix_")
+        path = os.path.join(self._tmpdir, "info.png")
+        property_card_png(info, path)
+        img = pv.read(path)
+        if self._info_widget is None:
+            self._info_widget = pl.add_logo_widget(img, position=(0.13, 0.36), size=(0.36, 0.46))
+        else:
+            self._info_widget.GetRepresentation().SetImage(img)
+            self._info_widget.On()
+
+    def _on_cp(self, v):
+        if not self._syncing:
+            self._set_scale("cp_scale", v)
+
+    def _on_path(self, v):
+        if not self._syncing:
+            self._set_scale("path_scale", v)
+
+    def _sync_graph_sliders(self):
+        """CP size only with the full molecular graph; path size with graph or paths (as in Qt)."""
+        for wdg, show in ((self._wcp, self.graph), (self._wpath, self.graph or self.paths)):
+            if wdg is None:
+                continue
+            try:
+                (wdg.On if show else wdg.Off)()
+                wdg.GetRepresentation().SetVisibility(1 if show else 0)
+            except Exception:
+                pass
 
     # -- molecular-properties panel (whole-molecule scalars can't be projected, so list them) --
     def _toggle_molecular(self, on):
@@ -761,11 +1069,12 @@ class Viewer:
             ("labels", self.style.labels, lambda s: self._set_style(labels=s)),
             ("values", self.style.show_values, lambda s: self._set_style(show_values=s)),
             ("molecular", self._mol_open, lambda s: self._toggle_molecular(s)),
+            ("matrix", self._matrix_on, lambda s: self._toggle_matrix(s)),
         ]
         # On a short window the left column would overlap the color-range slider band (at 0.20 of
         # window height), so compress the inter-row gaps by a scale factor (hit-target size stays
         # fixed) to keep it above the band; floored so text stays legible.
-        _LEFT_COL_H = 9 * 27 + 7 * 24 + 104        # natural extent at scale 1.0 (see gaps below)
+        _LEFT_COL_H = 10 * 27 + 11 * 24 + 156      # natural extent at scale 1.0 (see gaps below)
         # the color-range slider band is pinned at 0.20 of window height, plus ~25px for its value
         # label drawn above the track, plus a 15px safety margin
         headroom = 0.80 * h - 98 - 40
@@ -797,6 +1106,16 @@ class Viewer:
         sep2 = bonds_top + 6
         self._rect2d("_sep2", (12, sep2, 150, sep2 + 2), "#c7cbd1", 1.0, visible=True)
         self._add_radio_column(_G_BONDS, "bonds", self.style.bonds, header_y=bonds_top, tcol=tcol)
+        # "atom row" selector (off / DI / E_int): double-click an atom to color the structure by its
+        # row of the LDM or the IQA energy matrix -- the same choices as the Qt panel's combo.
+        row_top = bonds_top - round(22 * scale) - len(BOND_MODES) * DY - round(30 * scale)
+        self._radio_specs[_G_ROW] = dict(
+            options=list(ROW_OPTIONS), action=self._set_row_kind,
+            x=16, y_top=row_top - round(22 * scale), dy=DY, size=RS, label_of=ROW_LABEL.get)
+        sep3 = row_top + 6
+        self._rect2d("_sep3", (12, sep3, 150, sep3 + 2), "#c7cbd1", 1.0, visible=True)
+        self._add_radio_column(_G_ROW, "atom row", self.row_kind or "off", header_y=row_top,
+                               tcol=tcol)
 
         # top-right: level picker (radios; DFT shown as its functional M06-2X) + a property
         # DROPDOWN.  Choosing a level re-scopes the dropdown to the properties that level offers.
@@ -805,6 +1124,11 @@ class Viewer:
             x=w - 175, y_top=h - 66, dy=DY, size=RS, label_of=_level_label)
         self._add_radio_column(_G_LEVEL, "level", self.level, header_y=h - 44, tcol=tcol)
         self._add_prop_dropdown(x=w - 360, y=h - 66, header_y=h - 44)
+        # "info": an on-canvas card with the current property's definition (as the Qt info popup)
+        self._info_btn = pl.add_checkbox_button_widget(
+            self._toggle_info, value=self._info_on, position=(w - 252, h - 47), size=14,
+            color_on="#2c7fb8", color_off="#cfd4d9")
+        self._label("info", w - 234, h - 45, size=11, color=tcol, name="_lbl_info")
 
         self._building = False
 
@@ -817,6 +1141,20 @@ class Viewer:
                              value=self.style.bond_scale, title="bond size",
                              pointa=(0.76, 0.06), pointb=(0.95, 0.06), fmt="%.2f", **sl)
         self._add_range_sliders()
+        # QCT molecular-graph sizing (as the Qt panel's "CP size" / "path size"), shown only while the
+        # graph / paths overlay is drawn; creation fires the callback once -> muted
+        self._syncing = True
+        try:
+            self._wcp = pl.add_slider_widget(self._on_cp, rng=(0.3, 3.0), value=self.style.cp_scale,
+                                             title="CP size", pointa=(0.05, 0.135),
+                                             pointb=(0.24, 0.135), fmt="%.2f", **sl)
+            self._wpath = pl.add_slider_widget(self._on_path, rng=(0.3, 3.0),
+                                               value=self.style.path_scale, title="path size",
+                                               pointa=(0.76, 0.135), pointb=(0.95, 0.135),
+                                               fmt="%.2f", **sl)
+        finally:
+            self._syncing = False
+        self._sync_graph_sliders()
         if len(self.sids) > 1:
             self._wstruct = pl.add_slider_widget(
                 lambda v: self._goto(v), rng=(0, len(self.sids) - 1), value=self.idx,
@@ -1367,6 +1705,7 @@ class Viewer:
         p.add_key_event("comma", lambda: self._step_scale("bond_scale", 1 / 1.2))
         p.add_key_event("bracketright", lambda: self._step(1))
         p.add_key_event("bracketleft", lambda: self._step(-1))
+        p.add_key_event("e", self._cycle_row_kind)
 
     def open(self, off_screen=False):
         """Create the plotter, paint the first scene, add widgets + key bindings; return the plotter
@@ -1381,6 +1720,10 @@ class Viewer:
         if self.widgets:
             self._add_widgets()
         self._bind()
+        try:                                   # double-click an atom -> its matrix row (row mode)
+            self._pl.track_click_position(self._on_pick3d, side="left", double=True)
+        except Exception:
+            pass
         if self.widgets:
             try:
                 self._pl.ren_win.AddObserver("WindowResizeEvent", self._on_window_resize)
@@ -1430,6 +1773,10 @@ class Viewer:
             self._menu_mode = None      # the popup pool is gone; a resize just closes it
             self._menu_page = 0
             self.style = self.style.copy(window_size=new_size)
+            for lw in (self._matrix_widget, self._info_widget):
+                if lw is not None:
+                    lw.Off()                 # re-enabled (re-added to the renderer) by the refresh
+            self._wcp = self._wpath = None   # cleared with the other sliders; rebuilt below
             self._render_scene()
             if self.widgets:
                 self._add_widgets()
@@ -1495,7 +1842,7 @@ def _qt_backend_wanted(backend):
 def view(sid=None, sids=None, prop=None, method=None, graph=False, paths=False, ias=False,
          fragment=False, fragment_prop=None, cmap=None, interactive=True, save=None,
          points_only=False, reframe=False, widgets=True, style=None, con=None, root=None,
-         backend="auto", pbe0=False, **style_kw):
+         backend="auto", pbe0=False, row_atom=None, row_kind="ldm", row_level=None, **style_kw):
     """One-call viewer.  `interactive=True` opens the live explorer window -- by default the
     self-contained on-canvas **VTK** widget viewer (no extra system libs); the native **Qt** control
     panel (searchable entry picker + styled controls) is opt-in via ``backend='qt'`` / env
@@ -1529,7 +1876,8 @@ def view(sid=None, sids=None, prop=None, method=None, graph=False, paths=False, 
         scene = build_scene(con, sid or (sids[0] if sids else None), prop=prop, method=method,
                             graph=graph, paths=paths, ias=ias, fragment=fragment,
                             fragment_prop=fragment_prop, style=style,
-                            side=("iqadft" if pbe0 else None))
+                            side=("iqadft" if pbe0 else None), row_atom=row_atom,
+                            row_kind=row_kind, row_level=row_level)
         return emit_pyvista(scene, interactive=False, save=save, style=style,
                             points_only=points_only, reframe=reframe)
     finally:

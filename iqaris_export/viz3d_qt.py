@@ -25,7 +25,8 @@ from .style import Style, BOND_MODES
 from .registry import get_registry
 from .project import build_scene, FRAGMENTS_PROP
 from .viz3d import (add_scene, WINDOW_TITLE, FEATURED_QTAIM, FEATURED_SQM, FEATURED_BY_SIDE,
-                    side_for_level, VIEW_CMAPS, LEVEL_DISPLAY, _level_label, _GEOM)
+                    side_for_level, VIEW_CMAPS, LEVEL_DISPLAY, _level_label, _GEOM,
+                    MATRIX_LEVELS, MATRIX_KIND_LABEL, matrix_level, pick_atom)
 
 try:                                            # Qt is an OPTIONAL dependency (lazy)
     from qtpy import QtCore, QtGui, QtWidgets
@@ -294,6 +295,202 @@ if QT_AVAILABLE:
             v.addLayout(row)
             self.resize(500, 560)
 
+    class _MatrixDialog(QtWidgets.QDialog):
+        """Non-modal pop-up: heatmap of the localization-delocalization matrix (LDM) or the IQA energy
+        matrix of the viewer's current structure -- the same figure as `iqaris matrix --plot` -- with a
+        hover readout, optional atom groups, Save image / Save CSV, and click-a-row: clicking a cell
+        colors the 3D structure by that atom's row (the viewer's "atom row" mode)."""
+
+        def __init__(self, viewer):
+            super().__init__(viewer)
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+            self.viewer = viewer
+            self.sid = viewer.sid
+            self.m = None
+            self.ax = None
+            self._hl = None              # atom whose row/column is outlined (the viewer's pick)
+            self.setWindowTitle("Matrices")
+            self.setStyleSheet(_QSS)
+            self.setModal(False)
+            v = QtWidgets.QVBoxLayout(self)
+            v.setContentsMargins(16, 14, 16, 12)
+            v.setSpacing(8)
+            self.title = QtWidgets.QLabel("")
+            self.title.setObjectName("title")
+            self.title.setWordWrap(True)
+            v.addWidget(self.title)
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(8)
+            self.kind_combo = QtWidgets.QComboBox()
+            self.kind_combo.addItem("LDM (localization-delocalization)", "ldm")
+            self.kind_combo.addItem("IQA energy matrix", "iqa")
+            self.level_combo = QtWidgets.QComboBox()
+            for lab, w in (("matrix", self.kind_combo), ("level", self.level_combo)):
+                f = QtWidgets.QLabel(lab)
+                f.setObjectName("field")
+                row.addWidget(f)
+                row.addWidget(w, 1)
+            v.addLayout(row)
+            grow = QtWidgets.QHBoxLayout()
+            self.groups_edit = QtWidgets.QLineEdit()
+            self.groups_edit.setPlaceholderText("groups, e.g.  ring=1-6; OH=7,8   (empty = atoms)")
+            self.groups_edit.setToolTip("Condense the matrix over groups of atoms (1-based atom_index);\n"
+                                        "atoms in no group form a final 'rest' group.")
+            apply_btn = QtWidgets.QPushButton("Apply")
+            apply_btn.setObjectName("ghost")
+            grow.addWidget(self.groups_edit, 1)
+            grow.addWidget(apply_btn)
+            v.addLayout(grow)
+            self.fig = Figure(figsize=(6.6, 5.6))
+            self.canvas = FigureCanvasQTAgg(self.fig)
+            self.canvas.setMinimumSize(520, 440)
+            v.addWidget(self.canvas, 1)
+            self.status = QtWidgets.QLabel("")
+            self.status.setObjectName("subtitle")
+            self.status.setWordWrap(True)
+            v.addWidget(self.status)
+            brow = QtWidgets.QHBoxLayout()
+            self.save_img_btn = QtWidgets.QPushButton("Save image…")
+            self.save_csv_btn = QtWidgets.QPushButton("Save CSV…")
+            close_btn = QtWidgets.QPushButton("Close")
+            for b in (self.save_img_btn, self.save_csv_btn):
+                b.setObjectName("ghost")
+                brow.addWidget(b)
+            brow.addStretch(1)
+            brow.addWidget(close_btn)
+            v.addLayout(brow)
+            kind = "iqa" if viewer.level in config.SQM_METHODS else "ldm"
+            if viewer.row_kind in MATRIX_LEVELS and viewer.level in MATRIX_LEVELS[viewer.row_kind]:
+                kind = viewer.row_kind
+            self.kind_combo.setCurrentIndex(0 if kind == "ldm" else 1)
+            self._fill_levels(prefer=viewer.level)
+            self.kind_combo.currentIndexChanged.connect(self._on_kind)
+            self.level_combo.currentIndexChanged.connect(lambda _i: self._draw())
+            apply_btn.clicked.connect(self._draw)
+            self.groups_edit.returnPressed.connect(self._draw)
+            self.save_img_btn.clicked.connect(self._save_image)
+            self.save_csv_btn.clicked.connect(self._save_csv)
+            close_btn.clicked.connect(self.close)
+            self.canvas.mpl_connect("motion_notify_event", self._on_hover)
+            self.canvas.mpl_connect("button_press_event", self._on_click)
+            self.resize(780, 820)
+            self._draw()
+
+        @property
+        def kind(self):
+            return self.kind_combo.currentData()
+
+        @property
+        def level(self):
+            return self.level_combo.currentData()
+
+        def _fill_levels(self, prefer=None):
+            cur = prefer or self.level
+            self.level_combo.blockSignals(True)
+            self.level_combo.clear()
+            opts = MATRIX_LEVELS[self.kind]
+            for lv in opts:
+                self.level_combo.addItem(_level_label(lv), lv)
+            self.level_combo.setCurrentIndex(opts.index(cur) if cur in opts else 0)
+            self.level_combo.blockSignals(False)
+
+        def _on_kind(self, _i):
+            self._fill_levels()
+            self._draw()
+
+        def set_sid(self, sid):
+            self.sid = sid
+            self._draw()
+
+        def _draw(self):
+            from .matrices import atom_matrices, condense, parse_groups, plot_matrix
+            self.fig.clear()
+            self.ax = None
+            self.m = None
+            name = "LDM" if self.kind == "ldm" else "IQA energy matrix"
+            self.title.setText(f"{self.sid}  —  {name}  [{_level_label(self.level)}]")
+            try:
+                mats, missing = atom_matrices(self.viewer.con, [self.sid], kind=self.kind,
+                                              level=matrix_level(self.level))
+                if missing:
+                    raise ValueError(f"no {_level_label(self.level)} record for {self.sid} "
+                                     f"(e.g. a quality-flagged PBE0 record)")
+                m = mats[self.sid]
+                txt = self.groups_edit.text().strip()
+                if txt:
+                    groups, names = parse_groups(txt)
+                    m = condense(m, groups, names)
+                self.m = m
+                self.ax = self.fig.add_subplot(111)
+                vw = self.viewer
+                hl = (vw.row_atom if (not txt and vw.row_kind == self.kind and vw.level == self.level
+                                      and vw.sid == self.sid) else None)
+                plot_matrix(m, ax=self.ax, title=f"{self.sid}  |  {name}  |  {m.level}",
+                            highlight=hl)
+                self._hl = hl
+                self.status.setText("hover a cell for its value"
+                                    + ("; click a row to show it on the 3D structure"
+                                       if not txt else ""))
+            except (ValueError, KeyError) as e:
+                self.fig.text(0.5, 0.5, str(e), ha="center", va="center", wrap=True, fontsize=10)
+                self.status.setText("")
+            self.save_img_btn.setEnabled(self.m is not None)
+            self.save_csv_btn.setEnabled(self.m is not None)
+            self.canvas.draw_idle()
+
+        def _cell(self, event):
+            if self.m is None or event.inaxes is not self.ax or event.xdata is None:
+                return None
+            i, j = int(round(event.ydata)), int(round(event.xdata))
+            if 0 <= i < self.m.n and 0 <= j < self.m.n:
+                return i, j
+            return None
+
+        def _on_hover(self, event):
+            ij = self._cell(event)
+            if ij is None:
+                return
+            i, j = ij
+            m, a, b = self.m, self.m.labels[i], self.m.labels[j]
+            v = float(m.values[i, j])
+            if m.kind == "ldm":
+                txt = (f"{a}:  \u03bb = {v:.4f} e" if i == j else
+                       f"{a}\u2013{b}:  \u03b4/2 = {v:.4f} e   (\u03b4 = {2 * v:.4f} e)")
+            else:
+                txt = (f"{a}:  E_intra = {v:.5f} Eh" if i == j else
+                       f"{a}\u2013{b}:  E_int/2 = {v:.6f} Eh   (E_int = {2 * v * 627.509:.2f} kcal/mol)")
+            self.status.setText(txt)
+
+        def _on_click(self, event):
+            ij = self._cell(event)
+            if ij is None or any(isinstance(x, (list, tuple)) for x in self.m.atoms):
+                return
+            atom = int(self.m.atoms[ij[0]])
+            self.viewer.show_row(atom, self.kind, self.level)
+            self.status.setText(f"3D view: {MATRIX_KIND_LABEL[self.kind]} from A = "
+                                f"{self.m.labels[ij[0]]}  [{_level_label(self.level)}]")
+
+        def _save_image(self):
+            if self.m is None:
+                return
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Save heatmap", f"{self.sid}_{self.kind}_{matrix_level(self.level)}.png",
+                "Images (*.png *.pdf *.svg)")
+            if path:
+                self.fig.savefig(path, dpi=200, bbox_inches="tight")
+                self.status.setText(f"saved {path}")
+
+        def _save_csv(self):
+            if self.m is None:
+                return
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Save matrix", f"{self.sid}_{self.kind}_{matrix_level(self.level)}.csv",
+                "CSV (*.csv)")
+            if path:
+                self.m.to_dataframe().to_csv(path)
+                self.status.setText(f"saved {path}")
+
     class QtViewer(QtWidgets.QMainWindow):
         """The IQARIS-Explorer main window: a Qt control panel docked left of an embedded PyVista/VTK
         render view.  Reuses `build_scene`/`add_scene` verbatim, so the molecule looks identical to
@@ -325,10 +522,16 @@ if QT_AVAILABLE:
             self._syncing = False        # mute control signals during programmatic updates
             self._rng = None             # (lo, hi) data range of the active scalar, or None
             self._last_range = None
+            self.row_kind = None         # matrix-row mode: None | "ldm" | "iqa" (see build_scene)
+            self.row_atom = None         # 1-based atom A picked by double-click (or a heatmap row)
+            self._row_sid = None         # structure the picked atom belongs to
+            self._scene = None           # last rendered Scene (atom positions for picking)
+            self._matrix_dlg = None
             self.setWindowTitle(WINDOW_TITLE)
             self.setStyleSheet(_QSS)
             self.resize(1320, 820)
             self._build_ui()
+            self._add_shortcuts()
             self._render()
             self._refresh_prop_combo()
             self._update_nav()
@@ -408,6 +611,10 @@ if QT_AVAILABLE:
             # `_render` -- `clear()` drops the lights -- so shading/specular match `emit_pyvista`/Jmol.)
             self.plotter = QtInteractor(central)
             self.plotter.set_background(self.style.background)
+            try:                               # double-click an atom -> its matrix row (row mode)
+                self.plotter.track_click_position(self._on_pick3d, side="left", double=True)
+            except Exception:
+                pass
             try:
                 self.plotter.enable_anti_aliasing("ssaa")
             except Exception:
@@ -482,6 +689,9 @@ if QT_AVAILABLE:
             # level
             self.level_combo = self._combo(
                 [(_level_label(o), o) for o in (["DFT", "PBE0"] + list(config.SQM_METHODS))])
+            # show the level the viewer starts at (e.g. PBE0 when opened with pbe0=True); set before
+            # connecting so it does not trigger a re-render
+            self.level_combo.setCurrentIndex(max(0, self.level_combo.findData(self.level)))
             self.level_combo.currentIndexChanged.connect(self._on_level)
             # colormap
             self.cmap_combo = self._combo([(c, c) for c in VIEW_CMAPS])
@@ -516,6 +726,23 @@ if QT_AVAILABLE:
                                     "current level -- the totals that can't be colored onto atoms.")
             self.mol_btn.clicked.connect(self._on_molecular)
             form.addRow(self.mol_btn)
+            # matrix representations: a heatmap pop-up + a per-atom "row" coloring of the structure
+            self.matrix_btn = QtWidgets.QPushButton("Matrices…")
+            self.matrix_btn.setObjectName("ghost")
+            self.matrix_btn.setCursor(Qt.PointingHandCursor)
+            self.matrix_btn.setToolTip("Heatmap of the localization-delocalization matrix (LDM) or the\n"
+                                       "IQA energy matrix of this structure; hover for values, click a\n"
+                                       "row to color the structure by that atom's row.")
+            self.matrix_btn.clicked.connect(self._on_matrices)
+            form.addRow(self.matrix_btn)
+            self.row_combo = self._combo([("off", None)] +
+                                         [(MATRIX_KIND_LABEL[k], k) for k in ("ldm", "iqa")])
+            self.row_combo.setToolTip("Double-click an atom A in the 3D view to color every atom B by\n"
+                                      "its delocalization index DI(A,B) (log10) or its interaction\n"
+                                      "energy E_int(A,B) (kcal/mol) with A. LDM: M06-2X or PBE0;\n"
+                                      "IQA: PBE0 or a semiempirical level.")
+            self.row_combo.currentIndexChanged.connect(self._on_row_kind)
+            form.addRow(self._field("atom row"), self.row_combo)
             col.addWidget(g)
 
         def _build_display_group(self, col):
@@ -711,6 +938,102 @@ if QT_AVAILABLE:
                 return
             _MolecularDialog(f"{self.sid}  —  molecular  [{lvl}]", rows, parent=self).exec()
 
+        # -- keyboard shortcuts: the SAME keys as the default (VTK) window -----------------
+        def _add_shortcuts(self):
+            """g/p/i graph/paths/IAS, k fragment, o points, h H, l labels, v values, m colormap,
+            n bonds, +/- atom size, ,/. bond size, [ ] prev/next, e atom row (off/DI/E_int).
+            Window-wide, but inert while a text field (the entry search) has the focus."""
+            keys = {
+                "G": lambda: self._flip("graph"), "P": lambda: self._flip("paths"),
+                "I": lambda: self._flip("ias"), "K": lambda: self._flip("fragment"),
+                "O": lambda: self._flip("points_only"), "H": lambda: self._flip("show_h"),
+                "L": lambda: self._flip("labels"), "V": lambda: self._flip("show_values"),
+                "M": lambda: self._cycle_combo(self.cmap_combo),
+                "N": lambda: self._cycle_combo(self.bond_combo),
+                "E": lambda: self._cycle_combo(self.row_combo),
+                "+": lambda: self._nudge(self.atom_slider, 1.15),
+                "=": lambda: self._nudge(self.atom_slider, 1.15),
+                "-": lambda: self._nudge(self.atom_slider, 1 / 1.15),
+                ".": lambda: self._nudge(self.bond_slider, 1.2),
+                ",": lambda: self._nudge(self.bond_slider, 1 / 1.2),
+                "]": lambda: self.next_btn.click(), "[": lambda: self.prev_btn.click(),
+            }
+            self._shortcuts = []
+            for k, fn in keys.items():
+                sc = QtWidgets.QShortcut(QtGui.QKeySequence(k), self) \
+                    if hasattr(QtWidgets, "QShortcut") else QtGui.QShortcut(QtGui.QKeySequence(k), self)
+                sc.setContext(Qt.WindowShortcut)
+                sc.activated.connect(lambda fn=fn: None if self._typing() else fn())
+                self._shortcuts.append(sc)
+
+        def _typing(self):
+            return isinstance(QtWidgets.QApplication.focusWidget(), QtWidgets.QLineEdit)
+
+        def _flip(self, key):
+            cb = self._checks.get(key)
+            if cb is not None:
+                cb.setChecked(not cb.isChecked())
+
+        @staticmethod
+        def _cycle_combo(combo):
+            if combo.count():
+                combo.setCurrentIndex((combo.currentIndex() + 1) % combo.count())
+
+        @staticmethod
+        def _nudge(slider, factor):
+            slider.setValue(int(round(min(max(slider.value() * factor, slider.minimum()),
+                                          slider.maximum()))))
+
+        def _on_matrices(self):
+            """Open (or raise) the non-modal matrix heatmap pop-up for the current structure."""
+            if self._matrix_dlg is not None and self._matrix_dlg.isVisible():
+                if self._matrix_dlg.sid != self.sid:
+                    self._matrix_dlg.set_sid(self.sid)
+                self._matrix_dlg.raise_()
+                self._matrix_dlg.activateWindow()
+                return
+            self._matrix_dlg = _MatrixDialog(self)
+            self._matrix_dlg.show()
+
+        def _on_row_kind(self, _i):
+            if self._syncing:
+                return
+            self.row_kind = self.row_combo.currentData()
+            if self.row_kind is None:
+                self.row_atom = None
+            self._render()
+
+        def _row_ok(self):
+            return self.row_kind in MATRIX_LEVELS and self.level in MATRIX_LEVELS[self.row_kind]
+
+        def _on_pick3d(self, xy):
+            """Double-click handler: pick the atom under the cursor as the row's reference atom A."""
+            if not self.row_kind or self._scene is None:
+                return
+            atom = pick_atom(self.plotter, xy, self._scene)
+            if atom is None:
+                return
+            self.row_atom = atom
+            self._render()
+
+        def show_row(self, atom, kind, level):
+            """Color the structure by `kind`'s row of `atom` at viewer level `level` (used by the matrix
+            pop-up: clicking a heatmap row).  Switches the viewer's level if needed."""
+            self.row_kind = kind
+            self.row_atom = int(atom)
+            self._row_sid = self.sid
+            self._syncing = True
+            idx = self.row_combo.findData(kind)
+            if idx >= 0:
+                self.row_combo.setCurrentIndex(idx)
+            self._syncing = False
+            if level != self.level:
+                li = self.level_combo.findData(level)
+                if li >= 0:
+                    self.level_combo.setCurrentIndex(li)      # -> _on_level -> _render
+                    return
+            self._render()
+
         def _on_level(self, _i):
             if self._syncing:
                 return
@@ -899,10 +1222,27 @@ if QT_AVAILABLE:
                 opts = self._frag_prop_options()
                 if opts and self._frag_prop not in opts:
                     self._frag_prop = opts[0]
-            scene = build_scene(self.con, self.sid, prop=self.prop, method=self.method,
-                                graph=self.graph, paths=self.paths, ias=self.ias,
-                                fragment=self.fragment, fragment_prop=self._frag_prop,
-                                style=self.style, side=self._side)
+            if self._row_sid != self.sid:          # a picked atom belongs to ONE structure
+                self.row_atom = None
+                self._row_sid = self.sid
+            row = {}
+            if self.row_atom is not None and self._row_ok():
+                row = dict(row_atom=self.row_atom, row_kind=self.row_kind,
+                           row_level=matrix_level(self.level))
+            try:
+                scene = build_scene(self.con, self.sid, prop=self.prop, method=self.method,
+                                    graph=self.graph, paths=self.paths, ias=self.ias,
+                                    fragment=self.fragment, fragment_prop=self._frag_prop,
+                                    style=self.style, side=self._side, **row)
+            except ValueError:
+                if not row:
+                    raise
+                self.row_atom = None             # e.g. no clean PBE0 record for this structure
+                scene = build_scene(self.con, self.sid, prop=self.prop, method=self.method,
+                                    graph=self.graph, paths=self.paths, ias=self.ias,
+                                    fragment=self.fragment, fragment_prop=self._frag_prop,
+                                    style=self.style, side=self._side)
+            self._scene = scene
             self._last_range = scene.meta.get("data_range")
             # fragment coloring only actually engages when the covalent graph splits (>=2 pieces);
             # when it does, the aggregated interface channel drives coloring instead of `prop`.
@@ -921,6 +1261,13 @@ if QT_AVAILABLE:
             self._update_header(hdr, scene)
             self._sync_range_controls()
             self._sync_frag_ui()
+            dlg = self._matrix_dlg
+            if dlg is not None and dlg.isVisible():
+                if dlg.sid != self.sid:
+                    dlg.set_sid(self.sid)            # the pop-up follows the structure on screen
+                elif dlg._hl != (self.row_atom if (self.row_kind == dlg.kind and
+                                                   self.level == dlg.level) else None):
+                    dlg._draw()                      # re-outline the row picked in 3D
 
         def _sync_frag_ui(self):
             """Keep the property combo in step with fragment mode.  When host<->guest coloring engages,
@@ -938,7 +1285,17 @@ if QT_AVAILABLE:
             self.title_lbl.setText(self.sid)
             meta = scene.meta if isinstance(scene.meta, dict) else {}
             bits = []
-            if getattr(self, "_frag_active", False):       # host<->guest coloring OWNS the channel
+            if meta.get("row_atom") is not None:           # matrix-row coloring OWNS the atoms
+                short = "DI" if meta.get("row_kind") == "ldm" else "E_int"
+                bits.append(f"{short}(A,B) from A = {meta.get('row_ref')}  [{_level_label(self.level)}]")
+            elif self.row_kind and not self._row_ok():
+                bits.append("atom row: " + ("the LDM needs M06-2X or PBE0" if self.row_kind == "ldm"
+                                            else "the IQA matrix needs PBE0 or an SQM level"))
+            elif self.row_kind:
+                bits.append("atom row: double-click an atom")
+            if meta.get("row_atom") is not None:
+                pass
+            elif getattr(self, "_frag_active", False):       # host<->guest coloring OWNS the channel
                 col = meta.get("hg_col", "Einter_SQM")
                 short = col[:-4] if col.endswith("_SQM") else col[:-6] if col.endswith("_QTAIM") else col
                 unit = "kcal/mol" if meta.get("hg_level") else "e"

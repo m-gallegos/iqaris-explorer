@@ -47,6 +47,7 @@ analysis. The database itself is distributed separately on [Zenodo](#get-the-dat
   - [3. Summaries & plots](#3-summaries--plots)
   - [4. Visualize in 3D](#4-visualize-in-3d)
   - [5. Export for machine learning](#5-export-for-machine-learning)
+  - [6. Matrix representations (LDM and IQA)](#6-matrix-representations-ldm-and-iqa)
 - [Python API](#python-api)
 - [The database at a glance](#the-database-at-a-glance)
 - [Data quality & layers](#data-quality--layers)
@@ -69,6 +70,8 @@ The toolkit reads the released Parquet/DuckDB tables **read-only** and lets you:
   chosen level of theory; overlay the QTAIM molecular graph, bond paths and interatomic surfaces; and
   colour host–guest complexes by their interfacial interaction.
 - **Export** to common ML formats (extended XYZ, graph, tabular, ASE-db) with reproducible manifests.
+- **Build matrix representations**: the QTAIM localization–delocalization matrix (LDM) and the IQA
+  energy matrix of any structure, atom-resolved or condensed over fragments.
 
 Because the underlying calculations are single-point, **no atomic forces** are provided; exports pair
 the per-structure energies (as training targets) with the per-atom, per-pair and per-critical-point
@@ -259,6 +262,11 @@ iqaris project --sid G1 --prop AREA_QTAIM --ias --save ias.png
 
 # host–guest complexes: colour each atom by its summed interface interaction
 iqaris project --sid A11 --fragment --graph --save hostguest.png
+
+# one matrix row on the structure: every atom B coloured by its delocalization index DI(A,B)
+# with atom A = 4 (log10 scale), or by its interaction energy E_int(A,B) in kcal/mol
+iqaris project --sid dsgdb9nsd_000949 --row-atom 4 --level pbe0 --save row_di.png
+iqaris project --sid dsgdb9nsd_000949 --row-atom 1 --row-kind iqa --level pbe0 --values --save row_eint.png
 ```
 
 <table>
@@ -288,6 +296,19 @@ Two interchangeable viewer backends render the same scene:
 
 Any property can be projected at the M06-2X QTAIM level, the *ab initio* PBE0 QTAIM/IQA level, or any
 of the five semiempirical IQA methods; when no display is available, `--save FILE` renders off-screen.
+
+Both viewers also show the **matrix representations** of §6. Choose **atom row** = DI(A,B) or
+E_int(A,B) and double-click an atom A: every other atom is coloured by its row of the LDM (M06-2X, PBE0)
+or of the IQA energy matrix (PBE0 and the semiempirical levels), A is highlighted, and the key `e`
+cycles off → DI → E_int. The heatmap is a movable panel in the default window (**matrix**) and a
+separate window in the Qt panel (**Matrices…**: value readout under the mouse, atom groups, Save image
+/ Save CSV, click a row to show it on the structure); in both, the row of the picked atom is outlined.
+
+The two viewers offer the same controls and the same keyboard shortcuts (`g p i k o h l v m n e`,
+`+ - , .`, `[ ]`), including a property definition card (**info** / ⓘ: unit, type, level of theory,
+equation) and CP / bond-path size sliders while the molecular graph is shown. The Qt panel adds what an
+on-canvas window cannot: typing an id or formula to jump to any structure, and the mouse readout of
+heatmap values.
 
 ### 5. Export for machine learning
 
@@ -319,6 +340,48 @@ explicit comma-separated column list; `--energy-target` chooses the training ene
 column. Every export also writes a **`manifest.json`** (the exact selection) and **`columns.json`**
 (per-column family, unit and source view) so a dataset is fully reproducible.
 
+### 6. Matrix representations (LDM and IQA)
+
+Every atom pair is stored, bonded or not, so two matrix representations of a structure are built on
+demand from the released columns, with no extra calculation:
+
+| matrix | diagonal | off-diagonal | each row sums to | levels |
+|---|---|---|---|---|
+| localization–delocalization (LDM), `--kind ldm` | λ(A), `LI_QTAIM` | δ(A,B)/2, `DI_QTAIM`/2 | N(A), `N_QTAIM` | M06-2X, PBE0 |
+| IQA energy, `--kind iqa` | E_intra(A) | E_int(A,B)/2 | additive atomic energy, `E_IQA` / `Eadd_SQM` | PBE0, PM7, PM6, PM6-D3H4, PM6-D3H4X, PM6-ORG |
+
+The whole LDM sums to the number of electrons and the whole energy matrix to the molecular energy.
+Each result reports the largest difference between a row sum and the stored atomic value (a built-in
+consistency check at the level of the numerical integration). On screen the matrix is printed as a
+labelled table (`--format table`, the default without `--out`); `json`, `csv`, `npy` and `npz` write
+files (`json` is the default with `--out`).
+
+```bash
+# the PBE0 LDM of propane, printed as a labelled table with the row-sum check
+iqaris matrix --sid dsgdb9nsd_000013 --kind ldm --level pbe0
+
+# the ab initio IQA energy matrix as a labelled CSV table (Hartree)
+iqaris matrix --sid dsgdb9nsd_000013 --kind iqa --level pbe0 --format csv --out iqa.csv
+
+# condensed over atom groups (1-based atom_index): the two methyls; the CH2 becomes "rest"
+iqaris matrix --sid dsgdb9nsd_000013 --fragments "CH3a=1,4,5,6;CH3b=3,9,10,11"
+
+# many structures at once: one array (+ labels) per structure in a compressed NPZ
+iqaris matrix --family qm9 --natoms 3:20 --limit 1000 --kind iqa --level PM7 --format npz --out pm7.npz
+
+# a heatmap image (png, pdf or svg); also with --fragments
+iqaris matrix --sid dsgdb9nsd_000949 --kind iqa --level pbe0 --plot phenol_iqa.png
+```
+
+In the heatmaps only the off-diagonal entries are coloured (δ(A,B)/2 on a sequential scale, logarithmic
+when it spans several decades; E_int(A,B)/2 on a blue–red scale centred at zero, blue = stabilizing),
+because the diagonal, λ(A) or E_intra(A), is one to two orders of magnitude larger; the diagonal is
+printed in grey cells. The Python equivalent is `ie.plot_matrix(M, out="file.png")`.
+
+For the semiempirical levels the pairwise empirical dispersion is kept out of the energy matrix (as in
+`Eadd_SQM`); `--dispersion` adds it to the off-diagonal. `--include-problematic` reads the
+quality-flagged PBE0 records.
+
 ---
 
 ## Python API
@@ -342,6 +405,14 @@ ie.export(con, sel, props="atomic,charges", level="pbe0", fmt="extxyz", out="pbe
 print(ie.info("EINT_IQA"))                          # dictionary entry as text
 ok = filter_ids(method="PBE0", iqa_closure_resid_kj=1.0, con=con)   # granular sanity filter
 groups = molecule_groups(key="inchikey_block1", con=con)           # molecule key -> its structure_ids
+
+L = ie.ldm(con, "dsgdb9nsd_000013", level="pbe0")   # AtomMatrix: .values, .labels, .to_dataframe()
+E = ie.iqa_matrix(con, "dsgdb9nsd_000013", level="PM7")
+F = ie.condense(L, [[1, 4, 5, 6], [3, 9, 10, 11]], names=["CH3a", "CH3b"])   # group-level LDM
+mats, missing = ie.atom_matrices(con, ids, kind="iqa", level="pbe0")         # batched
+ie.plot_matrix(E, out="propane_pm7.png")                                     # heatmap image
+ie.view("dsgdb9nsd_000013", row_atom=2, row_kind="ldm", row_level="pbe0",
+        interactive=False, save="propane_di_row.png")                        # one row on the structure
 
 ie.view("A11", con=con, fragment=True)   # open a 3D window (needs a display)
 ```

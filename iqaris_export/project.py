@@ -323,6 +323,8 @@ NODATA_ATOM = "#c9ced4"    # neutral atom color for a NULL per-atom scalar (e.g.
 # the DI>0.30 graph) it belongs to, so the user can tell the pieces of a complex apart.  Not a DB
 # column -- handled specially in build_scene.  Fragments are ordered largest-first.
 FRAGMENTS_PROP = "fragments"
+ROW_REF_ATOM = "#e8288a"    # the reference atom A of a matrix-row projection (distinct from mako/RdBu)
+ROW_KINDS = ("ldm", "iqa")
 FRAGMENT_PALETTE = [        # qualitative, colorblind-friendly (seaborn "deep"-ish), largest-first
     "#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3", "#937860",
     "#da8bc3", "#8c8c8c", "#ccb974", "#64b5cd",
@@ -476,7 +478,8 @@ def molecular_values(con, sid, side="qtaim", method=DEFAULT_METHOD):
 
 
 def build_scene(con, sid, prop=None, method=DEFAULT_METHOD, graph=False, paths=False,
-                ias=False, fragment=False, fragment_prop=None, cmap=None, style=None, side=None):
+                ias=False, fragment=False, fragment_prop=None, cmap=None, style=None, side=None,
+                row_atom=None, row_kind="ldm", row_level=None):
     """Assemble a backend-neutral :class:`Scene` for `sid`.
 
     prop     : per-atom scalar column to color atoms by (e.g. q_QTAIM, q_SQM); None -> CPK.
@@ -495,6 +498,10 @@ def build_scene(con, sid, prop=None, method=DEFAULT_METHOD, graph=False, paths=F
                :data:`FRAGMENT_PAIR_PROPS` (the IQA-SQM interaction decomposition Einter / Eexchange
                / Eresonance / Eelstat[/ee/en/nn] / Edisp, or the QTAIM delocalization index
                DI_QTAIM).  None -> use `prop` if it is eligible, else default to Einter_SQM.
+    row_atom : 1-based atom index A -> color every atom B by one ROW of a matrix instead of `prop`:
+               ``row_kind="ldm"`` the delocalization index delta(A,B) (log10 scale, `row_level`
+               m062x | pbe0) or ``row_kind="iqa"`` the interaction energy E_int(A,B) in kcal/mol
+               (`row_level` pbe0 | an SQM method).  A itself is drawn in a distinct highlight color.
     style    : :class:`~iqaris_export.style.Style` bundle of appearance / perception knobs
                (colormap, color range, atom & bond sizing, bond perception, hydrogen/label
                visibility). None -> defaults (reproduces the current look). Legacy `cmap`
@@ -524,10 +531,11 @@ def build_scene(con, sid, prop=None, method=DEFAULT_METHOD, graph=False, paths=F
     hide = {a for a, e in zip(d.aidx, d.elem) if e == "H"} if not style.show_h else set()
 
     # ---- classify the requested property: atomic -> atom color, pairs -> bond color ---
-    use_fragment = fragment and nfrag >= 2
-    frag_color = prop == FRAGMENTS_PROP and not use_fragment   # categorical per-fragment coloring
+    use_row = row_atom is not None
+    use_fragment = fragment and nfrag >= 2 and not use_row
+    frag_color = prop == FRAGMENTS_PROP and not use_fragment and not use_row
     atom_prop = bond_prop = None
-    if prop is not None and not use_fragment and not frag_color:
+    if prop is not None and not use_fragment and not frag_color and not use_row:
         # A column may live in several views (e.g. Eexchange_SQM is both a molecular total and a
         # per-pair term); prefer the projectable reading -- atomic colors atoms, pairs colors bonds.
         fams = {s.family for s in get_registry(d.con)["by_name"].get(prop, [])}
@@ -545,7 +553,9 @@ def build_scene(con, sid, prop=None, method=DEFAULT_METHOD, graph=False, paths=F
 
     # ---- atom coloring ---------------------------------------------------------------
     atom_values = None                                      # per-row scalar shown by show_values
-    if use_fragment:
+    if use_row:
+        colors, atom_values = _row_colors(scene, d, sid, int(row_atom), row_kind, row_level, style)
+    elif use_fragment:
         # aggregate an eligible interface pair channel across the host<->guest pairs.  Prefer the
         # explicit `fragment_prop`, else the picked `prop` if it is itself eligible, else default to
         # the IQA total interaction energy Einter_SQM.
@@ -597,23 +607,29 @@ def build_scene(con, sid, prop=None, method=DEFAULT_METHOD, graph=False, paths=F
 
     # translucent "ghost" structure under a molecular graph or IAS overlay (unless a per-atom
     # scalar is the message, in which case keep the atoms opaque and readable)
-    ghost = (show_paths or ias) and atom_prop is None and not use_fragment and not frag_color
+    ghost = ((show_paths or ias) and atom_prop is None and not use_fragment and not frag_color
+             and not use_row)
     spacefill = (14.0 if ghost else 26.0) * style.atom_scale
     # Atom size is purely physical (vdW radius x style.atom_scale); it never encodes a property
     # value -- only color carries the data.
+    drawn = []                                              # atom_index of each drawn sphere
     for k, (pos, col, el) in enumerate(zip(d.xyz, colors, d.elem)):
         if d.aidx[k] in hide:
             continue
         scene.atoms.append((pos, col, spacefill, el))
+        drawn.append(d.aidx[k])
         if style.show_values and atom_values is not None:   # value on the atom it belongs to
-            scene.value_labels.append((pos, _fmt_val(atom_values[k])))
+            lab = ("A" if (use_row and d.aidx[k] == int(row_atom))
+                   else _fmt_val(atom_values[k]))
+            scene.value_labels.append((pos, lab))
+    scene.meta["atom_index"] = drawn                        # lets a viewer map a 3D pick to an atom
     scene.meta["ghost"] = ghost
     scene.meta["atom_translucent"] = 0.62 if ghost else None
 
     # ---- bonds / bond paths (skip any touching a hidden hydrogen) --------------------
     # value labels annotate the ONE primary scalar so the 3D view stays legible: atoms win over
     # bonds win over the molecular graph (CP rho) win over interatomic surfaces.
-    cps_primary = atom_prop is None and not use_fragment
+    cps_primary = atom_prop is None and not use_fragment and not use_row
     ias_primary = cps_primary and bond_prop is None and not show_paths
     vis = [(i, j, x) for (i, j, x) in draw_bonds if i not in hide and j not in hide]
     if bond_prop is not None:                               # color sticks by a per-pair scalar
@@ -644,6 +660,67 @@ def build_scene(con, sid, prop=None, method=DEFAULT_METHOD, graph=False, paths=F
         _add_ias(scene, d, style, label_values=style.show_values and ias_primary)
 
     return scene
+
+
+def _row_colors(scene, d, sid, atom, kind, level, style):
+    """Per-atom colors + display values for a matrix-row projection (see `build_scene` row_atom).
+    LDM rows are shown as log10 delta(A,B) on the sequential map (delocalization decays by orders of
+    magnitude through a molecule); IQA rows as E_int(A,B) in kcal/mol on a diverging map centred at 0
+    (blue = stabilizing, red = destabilizing).  Honors style cmap / vmin / vmax / vcenter."""
+    import matplotlib.pyplot as plt
+    from .matrices import row_values, _norm_kind, _norm_level
+    kind = _norm_kind(kind)
+    if level is None:
+        level = "m062x" if kind == "ldm" else "pbe0"
+    lvl = _norm_level(level)
+    if atom not in d.idx_of:
+        raise ValueError(f"atom {atom} is not in {sid!r} (atoms 1..{d.N})")
+    atoms, vals, m = row_values(d.con, sid, atom, kind=kind, level=level)
+    pos = {a: r for r, a in enumerate(atoms)}
+    raw = np.array([vals[pos[a]] if a in pos else np.nan for a in d.aidx], float)
+    ref_lab = f"{d.elem[d.idx_of[atom]]}{atom}"
+    if kind == "ldm":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            shown = np.where(raw > 0, np.log10(raw), np.nan)
+        fin = shown[np.isfinite(shown)]
+        hi = float(fin.max()) if fin.size else 0.0
+        lo = max(float(fin.min()) if fin.size else hi - 1.0, hi - 4.0)
+        lo = lo if style.vmin is None else style.vmin
+        hi = hi if style.vmax is None else style.vmax
+        cmap = plt_get(style.cmap) if style.cmap else _mako()
+        norm = Normalize(*_pad_deg(lo, hi))
+        label = f"log10 DI(A,B), A = {ref_lab} [{lvl}]"
+        unit = "log10 DI"
+        title = f"{sid}: DI(A,B) from A = {ref_lab} [{lvl}]"
+    else:
+        shown = raw
+        v = float(np.nanmax(np.abs(shown))) if np.isfinite(shown).any() else 1.0
+        lo = -v if style.vmin is None else style.vmin
+        hi = v if style.vmax is None else style.vmax
+        center = 0.0 if style.vcenter is None else style.vcenter
+        cmap = plt_get(style.cmap) if style.cmap else plt.cm.RdBu_r
+        norm = (TwoSlopeNorm(vcenter=center, vmin=lo, vmax=hi) if lo < center < hi
+                else Normalize(*_pad_deg(lo, hi)))
+        label = f"E_int(A,B) (kcal/mol), A = {ref_lab} [{lvl}]"
+        unit = "kcal/mol"
+        title = f"{sid}: E_int(A,B) from A = {ref_lab} [{lvl}]"
+    colors = hexes(np.nan_to_num(shown, nan=norm.vmin), cmap, norm)
+    for k, a in enumerate(d.aidx):
+        if a == atom:
+            colors[k] = ROW_REF_ATOM
+        elif not np.isfinite(shown[k]):
+            colors[k] = NODATA_ATOM
+    scene.colorbar = (cmap, norm, label, unit)
+    scene.title = title
+    scene.meta.update(row_atom=atom, row_kind=kind, row_level=lvl, row_ref=ref_lab)
+    _set_range(scene, shown)
+    disp = raw.copy()                                        # value labels show delta / kcal/mol
+    return colors, disp
+
+
+def _mako():
+    import seaborn as sns
+    return sns.color_palette("mako", as_cmap=True)
 
 
 def _add_bond_prop(scene, d, cov, col, method, style):
@@ -880,7 +957,8 @@ def _slug(s):
 # ========================================================= HIGH-LEVEL API ====================
 def project(sid, prop=None, method=DEFAULT_METHOD, graph=False, paths=False, ias=False,
             fragment=False, fragment_prop=None, cmap=None, out=None, root=None, con=None, jar=None,
-            size=None, view=None, style=None, pbe0=False):
+            size=None, view=None, style=None, pbe0=False, row_atom=None, row_kind="ldm",
+            row_level=None):
     """One-call: connect (read-only) if needed, build the scene, render a static Jmol PNG.
 
     Returns the PNG path.  `out` defaults to `<exports>/projections`.  `style` (a
@@ -893,8 +971,10 @@ def project(sid, prop=None, method=DEFAULT_METHOD, graph=False, paths=False, ias
     try:
         scene = build_scene(con, sid, prop=prop, method=method, graph=graph, paths=paths,
                             ias=ias, fragment=fragment, fragment_prop=fragment_prop, cmap=cmap,
-                            style=style, side=("iqadft" if pbe0 else None))
-        tags = [scene.meta.get("hg_col") if scene.meta.get("hg_col")
+                            style=style, side=("iqadft" if pbe0 else None), row_atom=row_atom,
+                            row_kind=row_kind, row_level=row_level)
+        tags = [f"{row_kind}row{row_atom}_{scene.meta.get('row_level')}" if row_atom is not None
+                else scene.meta.get("hg_col") if scene.meta.get("hg_col")
                 else prop or ("hg" if (fragment and scene.meta.get("nfrag", 1) >= 2) else "geom")]
         if graph:
             tags.append("graph")

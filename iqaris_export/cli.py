@@ -236,6 +236,13 @@ def main(argv=None):
     pj.add_argument("--fragment-prop", dest="fragment_prop",
                     help="interface channel aggregated in --fragment mode: Einter_SQM (default), "
                          "Eelstat_SQM, Eexchange_SQM, Eresonance_SQM, Edisp_SQM, or DI_QTAIM")
+    pj.add_argument("--row-atom", type=int, dest="row_atom", metavar="A",
+                    help="color every atom B by one ROW of a matrix for atom A (1-based atom_index): "
+                         "the delocalization index delta(A,B) (log10 scale) or, with --row-kind iqa, "
+                         "the interaction energy E_int(A,B) in kcal/mol; A is highlighted")
+    pj.add_argument("--row-kind", dest="row_kind", choices=["ldm", "iqa"], default="ldm",
+                    help="ldm (default): delta(A,B) at --level m062x|pbe0; iqa: E_int(A,B), ab initio "
+                         "at --level pbe0, otherwise at the semiempirical --method")
     pj.add_argument("--zoom", type=float, help="Jmol camera zoom percent")
     pj.add_argument("--size", help="render/window size WxH in px, e.g. 1200x900")
     pj.add_argument("--out", help="output directory (default exports/projections)")
@@ -284,6 +291,35 @@ def main(argv=None):
     px.add_argument("--batch-size", type=int, default=200)
     px.add_argument("--force-stub", action="store_true",
                     help="write all-zero forces (placeholder; DB has no real forces)")
+
+    pm = sub.add_parser(
+        "matrix", help="localization-delocalization (LDM) or IQA energy matrix of structures",
+        description="Atom-condensed matrices built from the stored atomic and pair columns (every "
+                    "atom pair is stored, bonded or not). ldm: L[A,A]=LI_QTAIM, L[A,B]=DI_QTAIM/2, "
+                    "rows sum to N_QTAIM. iqa: E[A,A]=E_intra(A), E[A,B]=E_int(A,B)/2, rows sum to "
+                    "the additive atomic energy (E_IQA at PBE0, Eadd_SQM at an SQM level).")
+    _add_selection(pm)
+    pm.add_argument("--sid", help="one structure_id (otherwise the selection flags pick structures)")
+    pm.add_argument("--kind", default="ldm", choices=["ldm", "iqa"],
+                    help="ldm (QTAIM localization-delocalization matrix, default) or iqa (energy)")
+    pm.add_argument("--level",
+                    help="ldm: m062x (default) | pbe0;  iqa: pbe0 (default, ab initio) | PM7 | PM6 | "
+                         "PM6-D3H4 | PM6-D3H4X | PM6-ORG")
+    pm.add_argument("--fragments",
+                    help='with --sid: condense over atom groups (1-based atom_index), e.g. "1-6;7,8" '
+                         'or "ring=1-6;CO=7,8"; atoms in no group form a final "rest" group')
+    pm.add_argument("--dispersion", action="store_true",
+                    help="iqa at an SQM level: add the pairwise empirical dispersion (Edisp_SQM/2) "
+                         "to the off-diagonal (excluded by default, as in Eadd_SQM)")
+    pm.add_argument("--include-problematic", action="store_true", dest="include_problematic",
+                    help="PBE0: read the quality-flagged records too (opt-in `_all` views)")
+    pm.add_argument("--format", choices=["table", "json", "csv", "npy", "npz"],
+                    help="table (readable, the default on screen), json (the default with --out), "
+                         "csv / npy (one structure), npz (one or many)")
+    pm.add_argument("--out", help="output file (required for csv, npy and npz)")
+    pm.add_argument("--plot", metavar="IMAGE",
+                    help="with --sid: also save a heatmap image (png, pdf or svg by extension); the "
+                         "off-diagonal entries are colored and the diagonal is printed")
 
     a = ap.parse_args(argv)
 
@@ -388,6 +424,14 @@ def _dispatch(a, con):
     elif a.cmd == "project":
         style = _style_from_args(a)
         pbe0 = _side_from_level(getattr(a, "level", None)) == "iqadft"
+        row = {}
+        if a.row_atom is not None:
+            if a.browse:
+                raise SystemExit("project: --row-atom picks one atom of one structure; it cannot be "
+                                 "combined with --browse (double-click an atom in the window instead)")
+            row = dict(row_atom=a.row_atom, row_kind=a.row_kind,
+                       row_level=("pbe0" if pbe0 else "m062x") if a.row_kind == "ldm"
+                       else ("pbe0" if pbe0 else a.method))
         if a.interactive or a.save:                     # interactive PyVista / VTK path
             from .viz3d import view as _view
             sids = None
@@ -403,7 +447,7 @@ def _dispatch(a, con):
             img = _view(a.sid, sids=sids, prop=a.prop, method=a.method, graph=a.graph,
                         paths=a.paths, ias=a.ias, fragment=a.fragment, fragment_prop=a.fragment_prop,
                         con=con, style=style, interactive=a.interactive, save=a.save,
-                        points_only=a.points_only, pbe0=pbe0)
+                        points_only=a.points_only, pbe0=pbe0, **row)
             print(json.dumps({"backend": "pyvista", "sid": a.sid or (sids[0] if sids else None),
                               "browse_n": (len(sids) if sids else 1),
                               "interactive": a.interactive, "saved": img}, indent=2, default=str))
@@ -418,7 +462,7 @@ def _dispatch(a, con):
                 size = (int(w), int(h))
             png = _project(a.sid, prop=a.prop, method=a.method, graph=a.graph, paths=a.paths,
                            ias=a.ias, fragment=a.fragment, fragment_prop=a.fragment_prop,
-                           out=a.out, con=con, view=view, size=size, style=style, pbe0=pbe0)
+                           out=a.out, con=con, view=view, size=size, style=style, pbe0=pbe0, **row)
             print(json.dumps({"backend": "jmol", "rendered": png, "sid": a.sid}, indent=2, default=str))
     elif a.cmd == "export":
         sel = _selection(a)
@@ -427,6 +471,106 @@ def _dispatch(a, con):
                        batch_size=a.batch_size, force_stub=a.force_stub,
                        include_problematic=getattr(a, "include_problematic", False))
         print(json.dumps({"done": stats, "out": a.out}, indent=2, default=str))
+    elif a.cmd == "matrix":
+        _do_matrix(a, con)
+
+
+_SELECTION_FLAGS = ("elements", "elements_only", "family", "natoms", "formula", "tier", "ids",
+                    "ids_file", "predicates", "sample", "limit", "one_per_molecule")
+
+
+def _do_matrix(a, con):
+    """`matrix` subcommand: one structure (--sid) or a selection, written as json/csv/npy/npz."""
+    import numpy as np
+    from .matrices import atom_matrices, condense, parse_groups, _norm_level
+    level = a.level or ("m062x" if a.kind == "ldm" else "pbe0")
+    if a.format is None:
+        a.format = "json" if a.out else "table"
+    if a.sid:
+        ids = [a.sid]
+    else:
+        if not any(getattr(a, f, None) for f in _SELECTION_FLAGS):
+            raise SystemExit("matrix: pass --sid ID, or selection flags (e.g. --ids, --family, "
+                             "--natoms, --limit) to pick the structures")
+        ids = _selection(a).resolve(con)
+    if a.fragments and not a.sid:
+        raise SystemExit("matrix: --fragments needs a single --sid (atom indices are per structure)")
+    if a.plot and not a.sid:
+        raise SystemExit("matrix: --plot needs a single --sid (one image per structure)")
+    if a.format in ("csv", "npy", "npz") and not a.out:
+        raise SystemExit(f"matrix: --format {a.format} needs --out FILE")
+    if a.format in ("csv", "npy") and len(ids) != 1:
+        raise SystemExit(f"matrix: --format {a.format} writes one structure; use npz or json for "
+                         f"{len(ids)} structures")
+    mats, missing = atom_matrices(con, ids, kind=a.kind, level=level,
+                                  include_problematic=a.include_problematic,
+                                  dispersion=a.dispersion)
+    if a.sid and missing:
+        if not con.execute("SELECT count(*) FROM manifest WHERE structure_id = ?",
+                           [a.sid]).fetchone()[0]:
+            raise SystemExit(f"error: structure_id {a.sid!r} not found")
+        hint = ""
+        if _norm_level(level) == "PBE0" and not a.include_problematic:
+            hint = " (no clean PBE0 record; --include-problematic reads the quality-flagged ones)"
+        raise SystemExit(f"error: structure_id {a.sid!r} has no {_norm_level(level)} record{hint}")
+    if not mats and a.format not in ("json", "table"):
+        raise SystemExit(f"matrix: none of the {len(ids)} selected structures has a "
+                         f"{_norm_level(level)} record; nothing written")
+    if a.fragments:
+        groups, names = parse_groups(a.fragments)
+        m = mats[a.sid]
+        mats = {a.sid: condense(m, groups, names)}
+    if a.plot:
+        import sys
+        from .matrices import plot_matrix
+        try:
+            plot_matrix(mats[a.sid], out=a.plot)
+        except ImportError as e:
+            raise SystemExit(f"matrix: --plot needs matplotlib (pip install 'iqaris-explorer[plots]'): {e}")
+        print(f"image: {a.plot}", file=sys.stderr)
+    devs = [m.max_rowsum_deviation() for m in mats.values()]
+    devs = [d for d in devs if np.isfinite(d)]
+    summary = {"kind": a.kind, "level": _norm_level(level), "n_structures": len(mats),
+               "missing": missing, "max_rowsum_deviation": max(devs) if devs else None}
+    if a.format == "table":
+        blocks = [m.to_text() for m in mats.values()]
+        if missing:
+            blocks.append(f"no {_norm_level(level)} record for {len(missing)} structure(s): "
+                          + ", ".join(missing[:10]) + (" ..." if len(missing) > 10 else ""))
+        text = "\n\n".join(blocks)
+        if a.out:
+            with open(a.out, "w") as fh:
+                fh.write(text + "\n")
+            print(json.dumps(dict(summary, out=a.out), indent=2, default=str))
+        else:
+            print(text)
+        return
+    if a.format == "json":
+        payload = (next(iter(mats.values())).as_dict() if (a.sid and mats)
+                   else dict(summary, matrices=[m.as_dict() for m in mats.values()]))
+        text = json.dumps(payload, indent=2, default=str)
+        if a.out:
+            with open(a.out, "w") as fh:
+                fh.write(text)
+            print(json.dumps(dict(summary, out=a.out), indent=2, default=str))
+        else:
+            print(text)
+        return
+    m0 = next(iter(mats.values())) if mats else None
+    if a.format == "csv":
+        m0.to_dataframe().to_csv(a.out)
+    elif a.format == "npy":
+        np.save(a.out, m0.values)
+    else:                                                   # npz: one array + labels per structure
+        arrays = {}
+        for sid, m in mats.items():
+            arrays[sid] = m.values
+            arrays[f"{sid}__labels"] = np.array(m.labels)
+        arrays["__meta__"] = np.array(json.dumps(
+            {"kind": a.kind, "level": _norm_level(level),
+             "unit": m0.unit if m0 else None, "structures": list(mats), "missing": missing}))
+        np.savez_compressed(a.out, **arrays)
+    print(json.dumps(dict(summary, out=a.out), indent=2, default=str))
 
 
 if __name__ == "__main__":
