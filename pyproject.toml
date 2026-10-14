@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iqaris-explorer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Explore, visualize and export the IQARIS real-space quantum-chemistry database."
 readme = "README.md"
 requires-python = ">=3.10"

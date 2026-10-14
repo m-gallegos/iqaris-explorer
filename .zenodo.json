@@ -1,0 +1,18 @@
+{
+  "upload_type": "software",
+  "title": "IQARIS-Explorer: a toolkit to explore, visualize, and export the IQARIS database",
+  "version": "0.2.0",
+  "language": "eng",
+  "license": "mit",
+  "description": "<p>IQARIS-Explorer is an open-source Python toolkit, with a command-line interface and a scriptable API, to explore, visualize, and export the IQARIS database of real-space quantum-chemical properties (QTAIM and IQA) for machine learning and analysis. The database itself is distributed separately on Zenodo (https://doi.org/10.5281/zenodo.22177220).</p><p>Version 0.2.0 adds the localization-delocalization matrix (LDM) and the IQA energy matrix, assembled on demand atom-resolved or condensed over user-defined fragments, with heatmap images and an interactive 3D matrix-row view in both viewers.</p>",
+  "creators": [
+    {"name": "Gallegos, Miguel", "affiliation": "Department of Physics and Materials Science, University of Luxembourg", "orcid": "0000-0001-7472-8158"},
+    {"name": "Guevara-Vela, José Manuel", "affiliation": "School of Engineering and Physical Sciences, Heriot-Watt University", "orcid": "0000-0003-1782-6792"},
+    {"name": "Tkatchenko, Alexandre", "affiliation": "Department of Physics and Materials Science, University of Luxembourg", "orcid": "0000-0002-1012-4854"}
+  ],
+  "keywords": ["Quantum Chemical Topology", "QTAIM", "Interacting Quantum Atoms", "IQA", "Machine Learning", "Chemical Databases", "Visualization", "Python"],
+  "related_identifiers": [
+    {"identifier": "10.5281/zenodo.22177220", "relation": "isSupplementTo", "scheme": "doi", "resource_type": "dataset"}
+  ],
+  "grants": [{"id": "10.13039/501100000780::101202630"}]
+}

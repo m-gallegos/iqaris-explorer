@@ -30,7 +30,7 @@ from .writers import get_writer, TABULAR_FORMATS, ALL_FORMATS, export_tabular
 from .matrices import AtomMatrix, ldm, iqa_matrix, atom_matrices, condense, plot_matrix
 from . import property_docs
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "connect", "Selection", "Predicate", "export", "describe", "coverage", "column_stats",
