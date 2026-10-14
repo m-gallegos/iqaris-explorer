@@ -8,6 +8,8 @@ for the IQARIS database.**
 ![Data: CC BY 4.0](https://img.shields.io/badge/Data-CC%20BY%204.0-green.svg)
 ![Structures](https://img.shields.io/badge/structures-268%2C639-orange.svg)
 ![Properties](https://img.shields.io/badge/properties-182-orange.svg)
+[![Software DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23363364.svg)](https://doi.org/10.5281/zenodo.23363364)
+[![Dataset DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22177220.svg)](https://doi.org/10.5281/zenodo.22177220)
 
 <div align="justify">
 
@@ -453,10 +455,16 @@ protocol and the data-quality policy are described in the paper and its Supporti
 
 ## Citation
 
-If you use this software or the IQARIS data, please cite the paper and the Zenodo dataset:
+If you use this software or the IQARIS data, please cite the paper, the Zenodo dataset, and the software:
 
 > M. Gallegos, J. M. Guevara-Vela, A. Tkatchenko. *IQARIS: An Atlas of Interacting Quantum Atoms
-> across Chemical Space* (submitted). Dataset: [`10.5281/zenodo.22177221`](https://doi.org/10.5281/zenodo.22177221).
+> across Chemical Space* (submitted).
+>
+> Dataset: [`10.5281/zenodo.22177221`](https://doi.org/10.5281/zenodo.22177221) (version 1.0; all versions:
+> [`10.5281/zenodo.22177220`](https://doi.org/10.5281/zenodo.22177220)).
+>
+> Software: [`10.5281/zenodo.23363364`](https://doi.org/10.5281/zenodo.23363364) (all versions; v0.2.0:
+> [`10.5281/zenodo.23363365`](https://doi.org/10.5281/zenodo.23363365)).
 
 ## License
 
